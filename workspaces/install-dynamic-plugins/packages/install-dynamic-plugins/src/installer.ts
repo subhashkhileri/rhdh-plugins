@@ -43,7 +43,11 @@ import {
   mergePlugin,
   preMergeOciDisabledState,
 } from './merger';
-import { applyInheritedPackage } from './oci-key';
+import {
+  applyInheritedPackage,
+  INHERIT_MARKER,
+  tryParseOciRegistryAndPath,
+} from './oci-key';
 import { computePluginHash } from './plugin-hash';
 import { Skopeo } from './skopeo';
 import { extractPluginName } from './plugin-name';
@@ -300,8 +304,8 @@ export function resolveRefPlugins(
   }
 }
 
-/** The `{{inherit}}` tag as it appears on an OCI package spec. */
-const INHERIT_TAG = ':{{inherit}}';
+/** The `{{inherit}}` tag as it appears on an OCI package spec (in tag position). */
+const INHERIT_TAG = `:${INHERIT_MARKER}`;
 
 /**
  * Resolve main-config OCI `{{inherit}}` entries against the include lists,
@@ -316,6 +320,12 @@ const INHERIT_TAG = ':{{inherit}}';
  * the raw includes first. Mirrors the operator's `resolveReferences`, which
  * resolves all references up front before merging.
  *
+ * Like `resolveRefPlugins`, this covers only the **main config**; an `{{inherit}}`
+ * appearing inside an included file is left for the merge-time `resolveInherit`
+ * in the merger (which keys off the already-merged, level-aware plugin map). The
+ * two paths are mutually exclusive — each entry is resolved exactly once — so
+ * neither is redundant.
+ *
  * @example
  * // oci://ghcr.io/org/plugin-a:{{inherit}} → oci://registry.redhat.io/rhdh/plugin-a@sha256:abc
  */
@@ -324,10 +334,7 @@ export function resolveInheritPlugins(
   includeLists: IncludePluginList[],
 ): void {
   const pluginsWithInherit = mainPlugins.filter(
-    p =>
-      typeof p.package === 'string' &&
-      isOciUrl(p.package) &&
-      p.package.includes(INHERIT_TAG),
+    p => isOciUrl(p.package) && p.package.includes(INHERIT_TAG),
   );
   if (pluginsWithInherit.length === 0) return;
 
@@ -351,10 +358,9 @@ export function resolveInheritPlugins(
       );
     }
 
-    // Everything after the first `!` is the user's explicit plugin path (the
-    // registry/tag/digest never contain `!`); when absent the base's path wins.
-    const bangIdx = plugin.package.indexOf('!');
-    const userPath = bangIdx === -1 ? null : plugin.package.slice(bangIdx + 1);
+    // The user's explicit `!plugin-path` (via the OCI grammar, not a naive
+    // split) takes precedence over the base's; when absent the base's wins.
+    const userPath = tryParseOciRegistryAndPath(plugin.package)?.path ?? null;
     plugin.package = applyInheritedPackage(base, userPath);
   }
 }

@@ -35,6 +35,9 @@ const OCI_PATTERN = [
 
 export const OCI_REGEX = new RegExp(OCI_PATTERN);
 
+/** The literal tag that requests version/registry inheritance from a base. */
+export const INHERIT_MARKER = '{{inherit}}';
+
 export type ParsedOciKey = {
   /**
    * Name-based identifier: the last OCI path segment (the plugin name), with
@@ -85,7 +88,7 @@ export async function ociPluginKey(
   let path = m[4] ?? null;
 
   const version = (tag ?? digest) as string;
-  const inherit = tag === '{{inherit}}' && digest === undefined;
+  const inherit = tag === INHERIT_MARKER && digest === undefined;
 
   // The matching key is the plugin name (last OCI path segment), ignoring the
   // registry host and namespace so the same plugin published to different

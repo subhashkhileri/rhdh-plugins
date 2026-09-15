@@ -18,13 +18,17 @@ import { mergePlugin } from './merger';
 import type { Plugin, PluginMap } from './types';
 
 /**
- * Coverage for the `{{inherit}}` resolution in `mergeOciPlugin` /
+ * Coverage for the name-based `{{inherit}}` resolution in `mergeOciPlugin` /
  * `resolveInherit`.
  *
- * `merger-pre-merge.test.ts` also spells `{{inherit}}` in its fixtures, but
- * `preMergeOciDisabledState` never parses the tag — it only reads the registry
- * and the `!path` suffix — so those occurrences exercise none of this file's
- * behaviour.
+ * Plugins are keyed by their name — the last OCI path segment — so the registry
+ * host and namespace are ignored. This mirrors the operator's
+ * `DynaPlugin.Name()` matching and is what lets `{{inherit}}` resolve across
+ * pipeline stages that publish the same plugin to different registries.
+ *
+ * `merger-pre-merge.test.ts` also spells `{{inherit}}` in its fixtures, but it
+ * only validates the OCI grammar and computes disabled state by plugin name;
+ * the actual version, registry, and path inheritance is exercised here.
  *
  * Every package string below either carries an explicit `!<plugin-path>` or is
  * a path-less `{{inherit}}`. Both return from `ociPluginKey` before
@@ -32,18 +36,22 @@ import type { Plugin, PluginMap } from './types';
  * skopeo call — is ever needed.
  */
 
-const REGISTRY = 'oci://registry.example.com/plugin';
-const OTHER_REGISTRY = 'oci://other.example.com/plugin';
-const KEY_A = `${REGISTRY}:!plugin-a`;
-const KEY_B = `${REGISTRY}:!plugin-b`;
-const OTHER_KEY_A = `${OTHER_REGISTRY}:!plugin-a`;
+/** The plugin published to two different registries at different pipeline stages. */
+const DEV_REGISTRY = 'oci://ghcr.io/org/plugin-a';
+const PROD_REGISTRY = 'oci://registry.redhat.io/rhdh/plugin-a';
+/** A second, differently-named plugin. */
+const REGISTRY_B = 'oci://ghcr.io/org/plugin-b';
+
+/** Both `plugin-a` registries resolve to this one name-based key. */
+const KEY_A = 'plugin-a';
+const KEY_B = 'plugin-b';
 
 const MAIN_FILE = 'main.yaml';
 const INCLUDE_FILE = 'include.yaml';
 
 /** Version shipped by the include — the one `{{inherit}}` must adopt. */
 const NEWER = '1.10.2';
-/** An older sibling in the same image — must never be picked silently. */
+/** An older sibling — must never be picked silently. */
 const OLDER = '1.9.0';
 
 /** Merge an include entry (level 0), the lower-precedence source. */
@@ -77,181 +85,24 @@ async function installErrorMessage(
   throw new Error('expected the merge to throw an InstallException');
 }
 
-describe('mergePlugin — OCI {{inherit}} with no resolvable base', () => {
-  it('reports the missing base configuration when nothing from the image was merged', async () => {
+describe('mergePlugin — OCI {{inherit}} matches by name across registries', () => {
+  it('resolves against a base published to a different registry', async () => {
     const all: PluginMap = {};
+    // Base comes from the production registry via an included catalog file.
+    await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!plugin-a`);
 
-    const message = await installErrorMessage(() =>
-      mergeMain(all, { package: `${REGISTRY}:{{inherit}}` }),
-    );
-
-    expect(message).toContain(
-      `Cannot use {{inherit}} for ${REGISTRY}: no existing plugin configuration found.`,
-    );
-    expect(message).toContain(
-      'Ensure a plugin from this image is defined in an included file with an explicit version.',
-    );
-    expect(all).toEqual({});
-  });
-
-  it('does not treat a plugin from a different image as a base', async () => {
-    const all: PluginMap = {};
-    await seedInclude(all, `${OTHER_REGISTRY}:${NEWER}!plugin-a`);
-
-    const message = await installErrorMessage(() =>
-      mergeMain(all, { package: `${REGISTRY}:{{inherit}}` }),
-    );
-
-    expect(message).toContain(
-      `Cannot use {{inherit}} for ${REGISTRY}: no existing plugin configuration found.`,
-    );
-    expect(Object.keys(all)).toEqual([OTHER_KEY_A]);
-  });
-});
-
-describe('mergePlugin — OCI {{inherit}} matching several plugins of the same image', () => {
-  async function seedTwoPlugins(): Promise<PluginMap> {
-    const all: PluginMap = {};
-    await seedInclude(all, `${REGISTRY}:${NEWER}!plugin-a`, 'include-a.yaml');
-    await seedInclude(all, `${REGISTRY}:${OLDER}!plugin-b`, 'include-b.yaml');
-    return all;
-  }
-
-  it('lists every candidate and tells the user how to disambiguate', async () => {
-    const all = await seedTwoPlugins();
-
-    const message = await installErrorMessage(() =>
-      mergeMain(all, { package: `${REGISTRY}:{{inherit}}` }),
-    );
-
-    expect(message).toContain(
-      `Cannot use {{inherit}} for ${REGISTRY}: multiple plugins from this image are defined in the included files:`,
-    );
-    // Each candidate is rendered with the version it currently resolves to, so
-    // the operator can see which one they would be inheriting.
-    expect(message).toContain(`  - ${REGISTRY}:${NEWER}!plugin-a`);
-    expect(message).toContain(`  - ${REGISTRY}:${OLDER}!plugin-b`);
-    // The remediation hint is the part the operator actually acts on.
-    expect(message).toContain(
-      `Please specify which plugin configuration to inherit from using: ${REGISTRY}:{{inherit}}!<plugin_path>`,
-    );
-  });
-
-  it('refuses to resolve rather than silently adopting the older candidate', async () => {
-    const all = await seedTwoPlugins();
-
-    // "{{inherit}} never resolves to a version older than the include
-    // provides" is not directly assertable: with one candidate the resolution
-    // adopts exactly that candidate's version, so the property holds by
-    // construction. The only way it could break is a future shortcut that
-    // picks `matches[0]` out of several candidates and lands on OLDER, which
-    // is what this guard — and this test — prevent.
-    //
-    // Asserting the message, not just the type: dropping this guard makes the
-    // merge fail later with the "no resolved tag or digest" error instead,
-    // which a bare `toThrow()` would happily accept.
-    const message = await installErrorMessage(() =>
-      mergeMain(all, { package: `${REGISTRY}:{{inherit}}` }),
-    );
-    expect(message).toContain('multiple plugins from this image are defined');
-
-    // Nothing was resolved: no new key, and both candidates keep the version
-    // and precedence level their include gave them.
-    expect(Object.keys(all)).toEqual([KEY_A, KEY_B]);
-    expect(all[KEY_A]?.version).toBe(NEWER);
-    expect(all[KEY_B]?.version).toBe(OLDER);
-    expect(all[KEY_A]?.last_modified_level).toBe(0);
-    expect(all[KEY_B]?.last_modified_level).toBe(0);
-  });
-});
-
-describe('mergePlugin — OCI {{inherit}} matching a base without a version', () => {
-  it('reports the broken invariant instead of inheriting `undefined`', async () => {
-    // `mergeOciPlugin` always assigns `plugin.version` before storing a plugin,
-    // so this state is not reachable through the merger itself — hence the
-    // `Internal:` prefix. The map is seeded by hand to exercise the guard.
-    //
-    // This locks the guard's message given the broken state, not the invariant
-    // that produces it: if the merger ever stopped assigning `version` before
-    // storing, this test would still pass and the guard would fire in
-    // production instead. Do not read it as protecting that invariant.
-    const all: PluginMap = {
-      [KEY_A]: { package: `${REGISTRY}:${NEWER}!plugin-a` },
-    };
-
-    const message = await installErrorMessage(() =>
-      mergeMain(all, { package: `${REGISTRY}:{{inherit}}` }),
-    );
-
-    expect(message).toContain(
-      `Internal: inherited plugin ${KEY_A} has no version`,
-    );
-  });
-});
-
-describe('mergePlugin — OCI {{inherit}} with an explicit !plugin-path', () => {
-  it('reports the unresolved tag when the referenced path was never merged', async () => {
-    const all: PluginMap = {};
-    const pkg = `${REGISTRY}:{{inherit}}!plugin-a`;
-
-    const message = await installErrorMessage(() =>
-      mergeMain(all, { package: pkg }),
-    );
-
-    expect(message).toContain(
-      '{{inherit}} tag is set and there is currently no resolved tag or digest',
-    );
-    // The package and the config file are named so the operator can find the
-    // offending entry without reading the whole config.
-    expect(message).toContain(`for ${pkg} in ${MAIN_FILE}.`);
-    expect(all).toEqual({});
-  });
-
-  it('keeps the base version and package when the referenced path exists', async () => {
-    const all: PluginMap = {};
-    await seedInclude(all, `${REGISTRY}:${NEWER}!plugin-a`);
-
-    await mergeMain(all, {
-      package: `${REGISTRY}:{{inherit}}!plugin-a`,
-      pluginConfig: { app: { title: 'overridden' } },
-    });
-
-    // The `{{inherit}}` literal must never reach the merged record.
-    expect(all[KEY_A]?.version).toBe(NEWER);
-    expect(all[KEY_A]?.package).toBe(`${REGISTRY}:${NEWER}!plugin-a`);
-    expect(all[KEY_A]?.pluginConfig).toEqual({ app: { title: 'overridden' } });
-    expect(all[KEY_A]?.last_modified_level).toBe(1);
-    expect(Object.keys(all)).toEqual([KEY_A]);
-  });
-});
-
-describe('mergePlugin — OCI {{inherit}} resolving against a single base', () => {
-  it('adopts the version and plugin path of the only candidate', async () => {
-    const all: PluginMap = {};
-    await seedInclude(all, `${REGISTRY}:${NEWER}!plugin-a`);
-
-    const plugin: Plugin = {
-      package: `${REGISTRY}:{{inherit}}`,
-      disabled: true,
-    };
+    // The user references the *dev* registry — a different host and namespace —
+    // yet the last path segment (`plugin-a`) is the same.
+    const plugin: Plugin = { package: `${DEV_REGISTRY}:{{inherit}}` };
     await mergeMain(all, plugin);
 
-    // `resolveInherit` documents that it rewrites `plugin.package` in place,
-    // and this is the only assertion of that contract. It is the override
-    // object that gets rewritten, not the merged record: the entry kept in
-    // `allPlugins` is the include's own, whose package was already concrete
-    // (asserted below). `installer.ts` reads only `Object.values(allPlugins)`
-    // afterwards, so nothing downstream depends on this rewrite today.
-    expect(plugin.package).toBe(`${REGISTRY}:${NEWER}!plugin-a`);
-    // It folds into the existing entry instead of creating a path-less one.
-    // No assertion on the merged `package` here: it is the include's own string
-    // and no mutation of the inherit path can change it, so asserting it would
-    // only restate the fixture. The contract that an override must not clobber
-    // it is enforced by the explicit-!path test above, which does catch that.
+    // The override is rewritten to the base's concrete package, so install
+    // pulls from the registry the catalog actually shipped, not the dev host.
+    expect(plugin.package).toBe(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
+    // Only one entry, keyed by name, carrying the inherited version.
     expect(Object.keys(all)).toEqual([KEY_A]);
     expect(all[KEY_A]?.version).toBe(NEWER);
-    expect(all[KEY_A]?.disabled).toBe(true);
-    expect(all[KEY_A]?.last_modified_level).toBe(1);
+    expect(all[KEY_A]?.package).toBe(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
   });
 
   it('logs the version and path it inherited', async () => {
@@ -260,8 +111,8 @@ describe('mergePlugin — OCI {{inherit}} resolving against a single base', () =
       .mockImplementation(() => true);
     try {
       const all: PluginMap = {};
-      await seedInclude(all, `${REGISTRY}:${NEWER}!plugin-a`);
-      await mergeMain(all, { package: `${REGISTRY}:{{inherit}}` });
+      await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!plugin-a`);
+      await mergeMain(all, { package: `${DEV_REGISTRY}:{{inherit}}` });
 
       const out = write.mock.calls.map(args => String(args[0])).join('\n');
       expect(out).toContain(
@@ -271,35 +122,171 @@ describe('mergePlugin — OCI {{inherit}} resolving against a single base', () =
       write.mockRestore();
     }
   });
+});
 
-  it('ignores a same-named plugin path belonging to a different image', async () => {
+describe('mergePlugin — OCI {{inherit}} with no resolvable base', () => {
+  it('reports the missing base configuration when nothing of that name was merged', async () => {
     const all: PluginMap = {};
-    // Candidates are matched on the full registry, not on the plugin path, so
-    // an unrelated image publishing `plugin-a` must not enter the selection.
+
+    const message = await installErrorMessage(() =>
+      mergeMain(all, { package: `${DEV_REGISTRY}:{{inherit}}` }),
+    );
+
+    expect(message).toContain(
+      `Cannot use {{inherit}} for '${KEY_A}': no existing plugin configuration found.`,
+    );
+    expect(message).toContain(
+      `Ensure a plugin named '${KEY_A}' is defined in an included file with an explicit version.`,
+    );
+    expect(all).toEqual({});
+  });
+
+  it('does not treat a differently-named plugin as a base', async () => {
+    const all: PluginMap = {};
+    await seedInclude(all, `${REGISTRY_B}:${NEWER}!plugin-b`);
+
+    const message = await installErrorMessage(() =>
+      mergeMain(all, { package: `${DEV_REGISTRY}:{{inherit}}` }),
+    );
+
+    expect(message).toContain(
+      `Cannot use {{inherit}} for '${KEY_A}': no existing plugin configuration found.`,
+    );
+    // The unrelated plugin is left untouched.
+    expect(Object.keys(all)).toEqual([KEY_B]);
+    expect(all[KEY_B]?.version).toBe(NEWER);
+  });
+});
+
+describe('mergePlugin — duplicate last-segment detection', () => {
+  it('rejects two plugins that resolve to the same name at the same level', async () => {
+    const all: PluginMap = {};
+    // Same last segment (`plugin-a`), different registries, both at level 0.
     await seedInclude(
       all,
-      `${OTHER_REGISTRY}:${OLDER}!plugin-a`,
-      'include-other.yaml',
+      `${PROD_REGISTRY}:${NEWER}!plugin-a`,
+      'include-a.yaml',
     );
-    await seedInclude(all, `${REGISTRY}:${NEWER}!plugin-a`);
 
-    await mergeMain(all, { package: `${REGISTRY}:{{inherit}}` });
+    const message = await installErrorMessage(() =>
+      seedInclude(all, `${DEV_REGISTRY}:${OLDER}!plugin-a`, 'include-b.yaml'),
+    );
 
+    // The error identifies both conflicting entries and the shared name.
+    expect(message).toContain(`${DEV_REGISTRY}:${OLDER}!plugin-a`);
+    expect(message).toContain(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
+    expect(message).toContain(`the plugin name '${KEY_A}'`);
+    expect(message).toContain('include-b.yaml');
+    // The first entry survives; the collision aborts before a second is stored.
+    expect(all[KEY_A]?.package).toBe(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
+  });
+});
+
+describe('mergePlugin — OCI {{inherit}} matching a base without a version', () => {
+  it('reports the broken invariant instead of inheriting `undefined`', async () => {
+    // `mergeOciPlugin` always assigns `plugin.version` before storing a plugin,
+    // so this state is not reachable through the merger itself — hence the
+    // `Internal:` prefix. The map is seeded by hand to exercise the guard.
+    const all: PluginMap = {
+      [KEY_A]: { package: `${PROD_REGISTRY}:${NEWER}!plugin-a` },
+    };
+
+    const message = await installErrorMessage(() =>
+      mergeMain(all, { package: `${DEV_REGISTRY}:{{inherit}}` }),
+    );
+
+    expect(message).toContain(
+      `Internal: inherited plugin '${KEY_A}' has no version`,
+    );
+  });
+});
+
+describe('mergePlugin — OCI {{inherit}} with an explicit !plugin-path', () => {
+  it('reports the missing base when the referenced name was never merged', async () => {
+    const all: PluginMap = {};
+    const pkg = `${DEV_REGISTRY}:{{inherit}}!plugin-a`;
+
+    const message = await installErrorMessage(() =>
+      mergeMain(all, { package: pkg }),
+    );
+
+    // An explicit `!plugin-path` resolves by name exactly like the path-less
+    // form, so the missing base is reported the same way.
+    expect(message).toContain(
+      `Cannot use {{inherit}} for '${KEY_A}': no existing plugin configuration found.`,
+    );
+    expect(all).toEqual({});
+  });
+
+  it('keeps the base version and package when the referenced path matches', async () => {
+    const all: PluginMap = {};
+    await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!plugin-a`);
+
+    await mergeMain(all, {
+      package: `${DEV_REGISTRY}:{{inherit}}!plugin-a`,
+      pluginConfig: { app: { title: 'overridden' } },
+    });
+
+    // The `{{inherit}}` literal must never reach the merged record.
     expect(all[KEY_A]?.version).toBe(NEWER);
-    expect(all[OTHER_KEY_A]?.version).toBe(OLDER);
+    expect(all[KEY_A]?.package).toBe(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
+    expect(all[KEY_A]?.pluginConfig).toEqual({ app: { title: 'overridden' } });
+    expect(all[KEY_A]?.last_modified_level).toBe(1);
+    expect(Object.keys(all)).toEqual([KEY_A]);
+  });
+
+  it('gives an explicit user !plugin-path precedence over the base path', async () => {
+    const all: PluginMap = {};
+    // The base ships one path; the user inherits the version/registry but points
+    // at a different path in the same image — the operator lets the user win.
+    await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!base-path`);
+
+    const plugin: Plugin = {
+      package: `${DEV_REGISTRY}:{{inherit}}!custom-path`,
+    };
+    await mergeMain(all, plugin);
+
+    // Base registry + inherited version, but the user's path — not `base-path`.
+    expect(plugin.package).toBe(`${PROD_REGISTRY}:${NEWER}!custom-path`);
+    expect(all[KEY_A]?.version).toBe(NEWER);
+    expect(all[KEY_A]?.package).toBe(`${PROD_REGISTRY}:${NEWER}!custom-path`);
+    expect(Object.keys(all)).toEqual([KEY_A]);
+  });
+});
+
+describe('mergePlugin — OCI {{inherit}} resolving against a single base', () => {
+  it('folds into the existing entry and carries the override fields', async () => {
+    const all: PluginMap = {};
+    await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!plugin-a`);
+
+    const plugin: Plugin = {
+      package: `${DEV_REGISTRY}:{{inherit}}`,
+      disabled: true,
+    };
+    await mergeMain(all, plugin);
+
+    // `resolveInherit` documents that it rewrites `plugin.package` in place to
+    // the base's concrete URL — this is the only assertion of that contract.
+    expect(plugin.package).toBe(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
+    // It folds into the existing entry instead of creating a path-less one.
+    expect(Object.keys(all)).toEqual([KEY_A]);
+    expect(all[KEY_A]?.version).toBe(NEWER);
+    expect(all[KEY_A]?.disabled).toBe(true);
+    expect(all[KEY_A]?.last_modified_level).toBe(1);
   });
 });
 
 describe('mergePlugin — OCI explicit version override', () => {
   it('lets the main config outrank an include, unlike {{inherit}}', async () => {
     const all: PluginMap = {};
-    await seedInclude(all, `${REGISTRY}:${NEWER}!plugin-a`);
+    await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!plugin-a`);
 
     // The main config outranks the includes, so an explicit tag there is an
     // intentional override — the case `{{inherit}}` deliberately opts out of.
-    await mergeMain(all, { package: `${REGISTRY}:2.0.0!plugin-a` });
+    // It matches the base by name even though the registry differs.
+    await mergeMain(all, { package: `${DEV_REGISTRY}:2.0.0!plugin-a` });
 
     expect(all[KEY_A]?.version).toBe('2.0.0');
-    expect(all[KEY_A]?.package).toBe(`${REGISTRY}:2.0.0!plugin-a`);
+    expect(all[KEY_A]?.package).toBe(`${DEV_REGISTRY}:2.0.0!plugin-a`);
   });
 });

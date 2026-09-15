@@ -16,8 +16,12 @@
 import { InstallException } from './errors';
 import { log } from './log';
 import { type OciImageCache } from './image-cache';
+import { extractPluginName } from './plugin-name';
 import { OCI_PROTO } from './protocols';
 import { RECOGNIZED_ALGORITHMS } from './types';
+
+/** The literal tag that requests version/registry inheritance from a base. */
+export const INHERIT_MARKER = '{{inherit}}';
 
 const OCI_PATTERN = [
   '^(',
@@ -26,7 +30,7 @@ const OCI_PATTERN = [
   String.raw`(?::\d+)?`, // optional port
   String.raw`(?:/[^\s:@]+)+`, // at least one path segment
   ')',
-  String.raw`(?::([^\s!@:]+)`, // tag
+  String.raw`(?::((?:\{\{inherit\}\}|[^\s!@:{}]+))`, // tag
   '|',
   String.raw`@((?:sha256|sha512|blake3):[^\s!@:]+))`, // or digest
   String.raw`(?:!([^\s]+))?$`, // optional !<plugin-path>
@@ -35,7 +39,17 @@ const OCI_PATTERN = [
 export const OCI_REGEX = new RegExp(OCI_PATTERN);
 
 export type ParsedOciKey = {
-  /** `oci://registry/image:!plugin_path` — version-stripped identifier. */
+  /**
+   * Name-based identifier: the last OCI path segment (the plugin name), with
+   * the registry host, namespace, tag/digest, and `!plugin-path` stripped.
+   *
+   * For example `oci://ghcr.io/org/backstage-plugin-catalog:1.0!path` and
+   * `oci://registry.redhat.io/rhdh/backstage-plugin-catalog@sha256:abc!path`
+   * both resolve to `backstage-plugin-catalog`, so `{{inherit}}` matching and
+   * cross-level overrides are host- and namespace-agnostic — aligning with the
+   * operator's `DynaPlugin.Name()`. The concrete registry is preserved on
+   * `plugin.package`, which is what install pulls from.
+   */
   pluginKey: string;
   /** Tag (e.g. `1.2.3`) or digest (`sha256:...`). */
   version: string;
@@ -74,11 +88,22 @@ export async function ociPluginKey(
   let path = m[4] ?? null;
 
   const version = (tag ?? digest) as string;
-  const inherit = tag === '{{inherit}}' && digest === undefined;
+  const inherit = tag === INHERIT_MARKER && digest === undefined;
+
+  // The matching key is the plugin name (last OCI path segment), ignoring the
+  // registry host and namespace so the same plugin published to different
+  // registries resolves to the same key. `registry` (group 1) never carries a
+  // tag or digest, so this yields just the image name.
+  const pluginKey = extractPluginName(registry);
+  if (!pluginKey) {
+    throw new InstallException(
+      `Cannot determine the plugin name (last OCI path segment) for '${pkg}'`,
+    );
+  }
 
   if (inherit && !path) {
-    // The merger will match against an earlier included plugin from the same image.
-    return { pluginKey: registry, version, inherit, resolvedPath: null };
+    // The merger will match against an earlier included plugin of the same name.
+    return { pluginKey, version, inherit, resolvedPath: null };
   }
 
   if (!path) {
@@ -92,7 +117,7 @@ export async function ociPluginKey(
   }
 
   return {
-    pluginKey: `${registry}:!${path}`,
+    pluginKey,
     version,
     inherit,
     resolvedPath: path,
@@ -150,6 +175,28 @@ export function tryParseOciRegistryAndPath(
   const m = OCI_REGEX.exec(pkg);
   if (!m) return null;
   return { registry: m[1] as string, path: m[4] ?? null };
+}
+
+/**
+ * Build the concrete package for an inherited entry: take the base plugin's
+ * image (registry + tag/digest, minus its own `!plugin-path`) and apply the
+ * caller's `userPath` when one was given, otherwise keep the base's path.
+ *
+ * This gives an explicit user `!plugin-path` precedence over the catalog's,
+ * matching the operator's `resolveInheritReference`. The registry, tag, and
+ * digest are never split on `!` (the OCI grammar forbids `!` there), so the
+ * first `!` always separates the image from the plugin path.
+ */
+export function applyInheritedPackage(
+  basePackage: string,
+  userPath: string | null,
+): string {
+  const bangIdx = basePackage.indexOf('!');
+  const baseImage =
+    bangIdx === -1 ? basePackage : basePackage.slice(0, bangIdx);
+  const basePath = bangIdx === -1 ? null : basePackage.slice(bangIdx + 1);
+  const path = userPath ?? basePath;
+  return path ? `${baseImage}!${path}` : baseImage;
 }
 
 function escape(s: string): string {

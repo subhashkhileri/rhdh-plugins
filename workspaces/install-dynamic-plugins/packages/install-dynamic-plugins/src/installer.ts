@@ -248,15 +248,16 @@ async function loadDynamicPluginsConfig(
  * @example
  * // ref://backstage-plugin-foo → oci://quay.io/rhdh/backstage-plugin-foo@sha256:abc
  */
-export function resolveRefPlugins(
-  mainPlugins: PluginSpec[],
+/**
+ * Build a name → concrete-package map from the include lists, keyed by plugin
+ * name (the last OCI path segment). First occurrence wins here; the name-based
+ * pre-merge validation rejects ambiguous same-level definitions before any
+ * plugin is installed.
+ */
+function buildIncludeNameMap(
   includeLists: IncludePluginList[],
-): void {
-  const pluginsWithRef = mainPlugins.filter(p => isRefUrl(p.package));
-  if (pluginsWithRef.length === 0) return;
-
+): Map<string, string> {
   const nameToPackage = new Map<string, string>();
-
   for (const [, plugins] of includeLists) {
     for (const plugin of plugins) {
       const name = extractPluginName(plugin.package);
@@ -265,6 +266,17 @@ export function resolveRefPlugins(
       }
     }
   }
+  return nameToPackage;
+}
+
+export function resolveRefPlugins(
+  mainPlugins: PluginSpec[],
+  includeLists: IncludePluginList[],
+): void {
+  const pluginsWithRef = mainPlugins.filter(p => isRefUrl(p.package));
+  if (pluginsWithRef.length === 0) return;
+
+  const nameToPackage = buildIncludeNameMap(includeLists);
 
   for (const plugin of pluginsWithRef) {
     const refName = plugin.package.slice(REF_PROTO.length);
@@ -292,7 +304,7 @@ export function resolveRefPlugins(
  *
  * Two-phase to match the Python pre-merge OCI-disable pass: load every
  * include file's plugin list into memory FIRST, compute the effectively
- * disabled OCI registries, then filter those entries out of every list
+ * disabled OCI plugin names, then filter those entries out of every list
  * before merging. Without this pass an OCI plugin marked `disabled: true`
  * at level 1 would still trigger a `skopeo` round-trip during the level-0
  * merge — wasted work and a footgun in restricted-network init containers.
@@ -336,7 +348,7 @@ async function loadAllPlugins(
 
   resolveRefPlugins(mainPlugins, includeLists);
 
-  const disabledRegistries = preMergeOciDisabledState(
+  const disabledPluginNames = preMergeOciDisabledState(
     includeLists,
     mainPlugins,
     configFileAbs,
@@ -345,14 +357,14 @@ async function loadAllPlugins(
   for (const [inc, plugins] of includeLists) {
     for (const plugin of filterDisabledOciPlugins(
       plugins,
-      disabledRegistries,
+      disabledPluginNames,
     )) {
       await mergePlugin(plugin, allPlugins, inc, /* level */ 0, imageCache);
     }
   }
   for (const plugin of filterDisabledOciPlugins(
     mainPlugins,
-    disabledRegistries,
+    disabledPluginNames,
   )) {
     await mergePlugin(
       plugin,

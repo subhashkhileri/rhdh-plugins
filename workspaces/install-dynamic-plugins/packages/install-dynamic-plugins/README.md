@@ -38,6 +38,24 @@ Runtime requirements: Node.js 22 or 24, and `skopeo` on `PATH` for OCI plugin su
 
 The init container invokes the wrapper `install-dynamic-plugins.sh /dynamic-plugins-root`, which delegates to the bin installed via `yarn install` from this package (see [redhat-developer/rhdh#4908](https://github.com/redhat-developer/rhdh/pull/4908)). Node.js is already present in the runtime image (it runs the Backstage backend), and `skopeo` is installed for OCI inspection — no new system packages are required.
 
+This init container runs in **both** deployment paths — the RHDH Helm chart and the RHDH Operator. The Operator can alternatively resolve dynamic-plugin references itself in Go (behind the opt-in `OPERATOR_DP_PROCESSING` flag), but by default it delegates that work to this init container. The two implementations therefore must agree; see [Plugin identity and `{{inherit}}` matching](#plugin-identity-and-inherit-matching).
+
+## Plugin identity and `{{inherit}}` matching
+
+A dynamic plugin's **identity is its name — the last path segment of its OCI image** — not its full `oci://` URL. The registry host, namespace, tag/digest, and `!plugin-path` suffix are all ignored when deciding whether two entries refer to the same plugin. For example, all three of these resolve to the plugin named `backstage-plugin-catalog`:
+
+```
+oci://ghcr.io/rhdh/backstage-plugin-catalog:1.0!backstage-plugin-catalog
+oci://registry.redhat.io/rhdh/backstage-plugin-catalog@sha256:abc!backstage-plugin-catalog
+oci://quay.io/rhdh/backstage-plugin-catalog:{{inherit}}
+```
+
+This makes resolution **host-agnostic**: `{{inherit}}` in a user's `dynamic-plugins.yaml` matches a plugin of the same name from an included file (typically the catalog-index DPDY) even when the two were published to different registries at different pipeline stages (e.g. GHCR in development, `registry.redhat.io` in production). The inherited entry adopts the **base** plugin's version _and_ its concrete package URL, so install still pulls from the registry the catalog actually shipped. This matches the operator's `DynaPlugin.Name()` behaviour (see [rhdh-operator#3215](https://github.com/redhat-developer/rhdh-operator/pull/3215)).
+
+Because identity is the name, **the last OCI path segment must be unique per plugin**. If two enabled entries at the same merge level resolve to the same name, the install fails with an error that names both conflicting packages — rename one of the images so they resolve to distinct names.
+
+> **NOTE:** This name-only identity means a single OCI image that packages **multiple** dynamic plugins under distinct `!plugin-path` suffixes cannot be distinguished by name — all of its plugins share the image's last path segment and would collide. The convention (and the way the RHDH catalog is built) is one plugin per image, with the image name equal to the plugin name. Multi-plugin images are not supported by name-based matching; publish each plugin as its own image.
+
 ## Architecture
 
 ```
@@ -123,4 +141,5 @@ yarn workspace @red-hat-developer-hub/cli-module-install-dynamic-plugins build
 
 - The **input contract** matches the previous Python script exactly: same `dynamic-plugins.yaml` schema (`includes`, `plugins`, `package`, `pluginConfig`, `disabled`, `pullPolicy`, `forceDownload`, `integrity`).
 - The **output contract** matches: same `app-config.dynamic-plugins.yaml`, same plugin directory layout, same `dynamic-plugin-config.hash` / `dynamic-plugin-image.hash` files.
-- `{{inherit}}` semantics, OCI path auto-detection, registry fallback, integrity algorithms, lock-file behaviour are preserved.
+- OCI path auto-detection, registry fallback, integrity algorithms, and lock-file behaviour are preserved.
+- `{{inherit}}` now matches by plugin **name** (last OCI path segment) rather than the full OCI URL, so resolution is host- and namespace-agnostic and aligns with the operator. See [Plugin identity and `{{inherit}}` matching](#plugin-identity-and-inherit-matching). Existing `dynamic-plugins.yaml` configs need no changes; explicit `!plugin-path` overrides and explicit version overrides behave as before.

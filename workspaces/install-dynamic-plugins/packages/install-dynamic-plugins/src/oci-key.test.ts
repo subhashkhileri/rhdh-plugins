@@ -24,32 +24,34 @@ type SuccessCase = {
   path: string | null;
 };
 
+// The matching key is the plugin name (last OCI path segment), so the registry
+// host, namespace, tag/digest, and `!plugin-path` are all stripped.
 const successCases: SuccessCase[] = [
   // Tag-based packages with explicit path
   {
     pkg: 'oci://quay.io/user/plugin:v1.0!plugin-name',
-    key: 'oci://quay.io/user/plugin:!plugin-name',
+    key: 'plugin',
     version: 'v1.0',
     inherit: false,
     path: 'plugin-name',
   },
   {
     pkg: 'oci://registry.io/plugin:latest!path/to/plugin',
-    key: 'oci://registry.io/plugin:!path/to/plugin',
+    key: 'plugin',
     version: 'latest',
     inherit: false,
     path: 'path/to/plugin',
   },
   {
     pkg: 'oci://ghcr.io/org/plugin:1.2.3!my-plugin',
-    key: 'oci://ghcr.io/org/plugin:!my-plugin',
+    key: 'plugin',
     version: '1.2.3',
     inherit: false,
     path: 'my-plugin',
   },
   {
     pkg: 'oci://docker.io/library/plugin:v2.0.0!plugin',
-    key: 'oci://docker.io/library/plugin:!plugin',
+    key: 'plugin',
     version: 'v2.0.0',
     inherit: false,
     path: 'plugin',
@@ -58,21 +60,21 @@ const successCases: SuccessCase[] = [
   // Digests with supported algorithms
   {
     pkg: 'oci://quay.io/user/plugin@sha256:abc123def456!plugin',
-    key: 'oci://quay.io/user/plugin:!plugin',
+    key: 'plugin',
     version: 'sha256:abc123def456',
     inherit: false,
     path: 'plugin',
   },
   {
     pkg: 'oci://registry.io/plugin@sha512:fedcba987654!plugin',
-    key: 'oci://registry.io/plugin:!plugin',
+    key: 'plugin',
     version: 'sha512:fedcba987654',
     inherit: false,
     path: 'plugin',
   },
   {
     pkg: 'oci://example.com/plugin@blake3:1234567890abcdef!my-plugin',
-    key: 'oci://example.com/plugin:!my-plugin',
+    key: 'plugin',
     version: 'blake3:1234567890abcdef',
     inherit: false,
     path: 'my-plugin',
@@ -81,44 +83,61 @@ const successCases: SuccessCase[] = [
   // Inherit
   {
     pkg: 'oci://quay.io/user/plugin:{{inherit}}!plugin',
-    key: 'oci://quay.io/user/plugin:!plugin',
+    key: 'plugin',
     version: '{{inherit}}',
     inherit: true,
     path: 'plugin',
   },
   {
     pkg: 'oci://registry.io/plugin:{{inherit}}!path/to/plugin',
-    key: 'oci://registry.io/plugin:!path/to/plugin',
+    key: 'plugin',
     version: '{{inherit}}',
     inherit: true,
     path: 'path/to/plugin',
   },
 
+  // The last path segment is the key regardless of the registry host/namespace,
+  // so the same plugin published to different registries resolves identically.
+  {
+    pkg: 'oci://ghcr.io/org/backstage-plugin-catalog:1.0!backstage-plugin-catalog',
+    key: 'backstage-plugin-catalog',
+    version: '1.0',
+    inherit: false,
+    path: 'backstage-plugin-catalog',
+  },
+  {
+    pkg: 'oci://registry.redhat.io/rhdh/backstage-plugin-catalog:1.0!backstage-plugin-catalog',
+    key: 'backstage-plugin-catalog',
+    version: '1.0',
+    inherit: false,
+    path: 'backstage-plugin-catalog',
+  },
+
   // Host:port registries
   {
     pkg: 'oci://registry.localhost:5000/rhdh-plugins/plugin:v1.0!plugin-name',
-    key: 'oci://registry.localhost:5000/rhdh-plugins/plugin:!plugin-name',
+    key: 'plugin',
     version: 'v1.0',
     inherit: false,
     path: 'plugin-name',
   },
   {
     pkg: 'oci://registry.localhost:5000/path@sha256:abc123!plugin',
-    key: 'oci://registry.localhost:5000/path:!plugin',
+    key: 'path',
     version: 'sha256:abc123',
     inherit: false,
     path: 'plugin',
   },
   {
     pkg: 'oci://registry.localhost:5000/path:{{inherit}}!plugin',
-    key: 'oci://registry.localhost:5000/path:!plugin',
+    key: 'path',
     version: '{{inherit}}',
     inherit: true,
     path: 'plugin',
   },
   {
     pkg: 'oci://10.0.0.1:5000/repo/plugin:tag!plugin',
-    key: 'oci://10.0.0.1:5000/repo/plugin:!plugin',
+    key: 'plugin',
     version: 'tag',
     inherit: false,
     path: 'plugin',
@@ -179,9 +198,9 @@ describe('ociPluginKey — invalid cases', () => {
 });
 
 describe('ociPluginKey — {{inherit}} without path', () => {
-  it('returns registry-only key and null path', async () => {
+  it('returns the name-based key and null path', async () => {
     const parsed = await ociPluginKey('oci://registry.io/plugin:{{inherit}}');
-    expect(parsed.pluginKey).toBe('oci://registry.io/plugin');
+    expect(parsed.pluginKey).toBe('plugin');
     expect(parsed.version).toBe('{{inherit}}');
     expect(parsed.inherit).toBe(true);
     expect(parsed.resolvedPath).toBeNull();
@@ -198,9 +217,7 @@ describe('ociPluginKey — auto-detect from image cache', () => {
       'oci://registry.io/plugin:v1.0',
       fakeImageCache(['auto-detected-plugin']),
     );
-    expect(parsed.pluginKey).toBe(
-      'oci://registry.io/plugin:!auto-detected-plugin',
-    );
+    expect(parsed.pluginKey).toBe('plugin');
     expect(parsed.version).toBe('v1.0');
     expect(parsed.resolvedPath).toBe('auto-detected-plugin');
   });

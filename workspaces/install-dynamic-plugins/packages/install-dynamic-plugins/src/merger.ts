@@ -191,7 +191,10 @@ async function mergeOciPlugin(
   log(`\n======= Overriding dynamic plugin configuration ${parsed.pluginKey}`);
   if (existing.last_modified_level === level) {
     throw new InstallException(
-      `Duplicate plugin configuration for ${plugin.package} found in ${configFile}.`,
+      `Duplicate plugin configuration: '${plugin.package}' (in ${configFile}) and ` +
+        `'${existing.package}' both resolve to the plugin name '${parsed.pluginKey}'. ` +
+        `The last OCI path segment must be unique per plugin — rename one of the ` +
+        `images so they resolve to distinct names.`,
     );
   }
 
@@ -213,56 +216,46 @@ async function mergeOciPlugin(
 }
 
 /**
- * Resolve `{{inherit}}` without a plugin path — finds a single previously-
- * merged plugin from the same image, adopts its version + path, and mutates
- * `plugin.package` in place. Throws with a helpful message when zero or
- * multiple matches are found.
+ * Resolve `{{inherit}}` without a plugin path — finds the previously-merged
+ * plugin with the same name (last OCI path segment) regardless of which
+ * registry it came from, adopts its version + package, and mutates
+ * `plugin.package` in place. Throws with a helpful message when no plugin of
+ * that name was merged.
+ *
+ * Because plugins are keyed by name, there is at most one candidate: a second
+ * plugin resolving to the same name at the same merge level is rejected earlier
+ * as a duplicate (see `mergeOciPlugin`).
  */
 function resolveInherit(
   plugin: Plugin,
   allPlugins: PluginMap,
   parsed: ParsedOciKey,
 ): ParsedOciKey {
-  const prefix = `${parsed.pluginKey}:!`;
-  const matches = Object.keys(allPlugins).filter(k => k.startsWith(prefix));
-  if (matches.length === 0) {
+  const basePlugin = allPlugins[parsed.pluginKey];
+  if (!basePlugin) {
     throw new InstallException(
-      `Cannot use {{inherit}} for ${parsed.pluginKey}: no existing plugin ` +
-        `configuration found. Ensure a plugin from this image is defined in an ` +
-        `included file with an explicit version.`,
+      `Cannot use {{inherit}} for '${parsed.pluginKey}': no existing plugin ` +
+        `configuration found. Ensure a plugin named '${parsed.pluginKey}' is ` +
+        `defined in an included file with an explicit version.`,
     );
   }
-  if (matches.length > 1) {
-    const formatted = matches
-      .map(m => {
-        const baseVersion = allPlugins[m]?.version ?? '';
-        const registryPart = m.split(':!')[0] ?? '';
-        const pathPart = m.split(':!').at(-1) ?? '';
-        return `  - ${registryPart}:${baseVersion}!${pathPart}`;
-      })
-      .join('\n');
+  if (!basePlugin.version) {
     throw new InstallException(
-      `Cannot use {{inherit}} for ${parsed.pluginKey}: multiple plugins from ` +
-        `this image are defined in the included files:\n${formatted}\n` +
-        `Please specify which plugin configuration to inherit from using: ` +
-        `${parsed.pluginKey}:{{inherit}}!<plugin_path>`,
-    );
-  }
-  const matchedKey = matches[0] as string;
-  const basePlugin = allPlugins[matchedKey];
-  if (!basePlugin?.version) {
-    throw new InstallException(
-      `Internal: inherited plugin ${matchedKey} has no version`,
+      `Internal: inherited plugin '${parsed.pluginKey}' has no version`,
     );
   }
   const version = basePlugin.version;
-  const resolvedPath = matchedKey.split(':!').at(-1) ?? '';
-  const registryPart = matchedKey.split(':!')[0] ?? '';
-  plugin.package = `${registryPart}:${version}!${resolvedPath}`;
+  // The base package is a concrete OCI URL carrying the correct registry and
+  // plugin path — adopt it wholesale so install pulls from the right registry.
+  // Recover the path via the OCI grammar (not a naive `!` split) so a plugin
+  // path that itself contains `!` is preserved.
+  const resolvedPath =
+    tryParseOciRegistryAndPath(basePlugin.package)?.path ?? '';
+  plugin.package = basePlugin.package;
   log(
-    `\n======= Inheriting version \`${version}\` and plugin path \`${resolvedPath}\` for ${matchedKey}`,
+    `\n======= Inheriting version \`${version}\` and plugin path \`${resolvedPath}\` for ${parsed.pluginKey}`,
   );
-  return { pluginKey: matchedKey, version, inherit: true, resolvedPath };
+  return { pluginKey: parsed.pluginKey, version, inherit: true, resolvedPath };
 }
 
 function doMerge(

@@ -16,6 +16,7 @@
 import { InstallException } from './errors';
 import { log } from './log';
 import { type OciImageCache } from './image-cache';
+import { extractPluginName } from './plugin-name';
 import { OCI_PROTO } from './protocols';
 import { RECOGNIZED_ALGORITHMS } from './types';
 
@@ -35,7 +36,17 @@ const OCI_PATTERN = [
 export const OCI_REGEX = new RegExp(OCI_PATTERN);
 
 export type ParsedOciKey = {
-  /** `oci://registry/image:!plugin_path` — version-stripped identifier. */
+  /**
+   * Name-based identifier: the last OCI path segment (the plugin name), with
+   * the registry host, namespace, tag/digest, and `!plugin-path` stripped.
+   *
+   * For example `oci://ghcr.io/org/backstage-plugin-catalog:1.0!path` and
+   * `oci://registry.redhat.io/rhdh/backstage-plugin-catalog@sha256:abc!path`
+   * both resolve to `backstage-plugin-catalog`, so `{{inherit}}` matching and
+   * cross-level overrides are host- and namespace-agnostic — aligning with the
+   * operator's `DynaPlugin.Name()`. The concrete registry is preserved on
+   * `plugin.package`, which is what install pulls from.
+   */
   pluginKey: string;
   /** Tag (e.g. `1.2.3`) or digest (`sha256:...`). */
   version: string;
@@ -76,9 +87,20 @@ export async function ociPluginKey(
   const version = (tag ?? digest) as string;
   const inherit = tag === '{{inherit}}' && digest === undefined;
 
+  // The matching key is the plugin name (last OCI path segment), ignoring the
+  // registry host and namespace so the same plugin published to different
+  // registries resolves to the same key. `registry` (group 1) never carries a
+  // tag or digest, so this yields just the image name.
+  const pluginKey = extractPluginName(registry);
+  if (!pluginKey) {
+    throw new InstallException(
+      `Cannot determine the plugin name (last OCI path segment) for '${pkg}'`,
+    );
+  }
+
   if (inherit && !path) {
-    // The merger will match against an earlier included plugin from the same image.
-    return { pluginKey: registry, version, inherit, resolvedPath: null };
+    // The merger will match against an earlier included plugin of the same name.
+    return { pluginKey, version, inherit, resolvedPath: null };
   }
 
   if (!path) {
@@ -92,7 +114,7 @@ export async function ociPluginKey(
   }
 
   return {
-    pluginKey: `${registry}:!${path}`,
+    pluginKey,
     version,
     inherit,
     resolvedPath: path,

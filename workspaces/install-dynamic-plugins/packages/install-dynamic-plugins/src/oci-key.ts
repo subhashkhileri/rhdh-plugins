@@ -174,6 +174,28 @@ export function tryParseOciRegistryAndPath(
   return { registry: m[1] as string, path: m[4] ?? null };
 }
 
+/**
+ * Build the concrete package for an inherited entry: take the base plugin's
+ * image (registry + tag/digest, minus its own `!plugin-path`) and apply the
+ * caller's `userPath` when one was given, otherwise keep the base's path.
+ *
+ * This gives an explicit user `!plugin-path` precedence over the catalog's,
+ * matching the operator's `resolveInheritReference`. The registry, tag, and
+ * digest are never split on `!` (the OCI grammar forbids `!` there), so the
+ * first `!` always separates the image from the plugin path.
+ */
+export function applyInheritedPackage(
+  basePackage: string,
+  userPath: string | null,
+): string {
+  const bangIdx = basePackage.indexOf('!');
+  const baseImage =
+    bangIdx === -1 ? basePackage : basePackage.slice(0, bangIdx);
+  const basePath = bangIdx === -1 ? null : basePackage.slice(bangIdx + 1);
+  const path = userPath ?? basePath;
+  return path ? `${baseImage}!${path}` : baseImage;
+}
+
 function escape(s: string): string {
   return s.replaceAll(/[.*+?^${}()|[\]\\/]/g, String.raw`\$&`);
 }

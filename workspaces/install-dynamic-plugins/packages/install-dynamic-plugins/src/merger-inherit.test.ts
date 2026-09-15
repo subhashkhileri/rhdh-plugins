@@ -203,7 +203,7 @@ describe('mergePlugin — OCI {{inherit}} matching a base without a version', ()
 });
 
 describe('mergePlugin — OCI {{inherit}} with an explicit !plugin-path', () => {
-  it('reports the unresolved tag when the referenced path was never merged', async () => {
+  it('reports the missing base when the referenced name was never merged', async () => {
     const all: PluginMap = {};
     const pkg = `${DEV_REGISTRY}:{{inherit}}!plugin-a`;
 
@@ -211,16 +211,15 @@ describe('mergePlugin — OCI {{inherit}} with an explicit !plugin-path', () => 
       mergeMain(all, { package: pkg }),
     );
 
+    // An explicit `!plugin-path` resolves by name exactly like the path-less
+    // form, so the missing base is reported the same way.
     expect(message).toContain(
-      '{{inherit}} tag is set and there is currently no resolved tag or digest',
+      `Cannot use {{inherit}} for '${KEY_A}': no existing plugin configuration found.`,
     );
-    // The package and the config file are named so the operator can find the
-    // offending entry without reading the whole config.
-    expect(message).toContain(`for ${pkg} in ${MAIN_FILE}.`);
     expect(all).toEqual({});
   });
 
-  it('keeps the base version and package when the referenced path exists', async () => {
+  it('keeps the base version and package when the referenced path matches', async () => {
     const all: PluginMap = {};
     await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!plugin-a`);
 
@@ -234,6 +233,24 @@ describe('mergePlugin — OCI {{inherit}} with an explicit !plugin-path', () => 
     expect(all[KEY_A]?.package).toBe(`${PROD_REGISTRY}:${NEWER}!plugin-a`);
     expect(all[KEY_A]?.pluginConfig).toEqual({ app: { title: 'overridden' } });
     expect(all[KEY_A]?.last_modified_level).toBe(1);
+    expect(Object.keys(all)).toEqual([KEY_A]);
+  });
+
+  it('gives an explicit user !plugin-path precedence over the base path', async () => {
+    const all: PluginMap = {};
+    // The base ships one path; the user inherits the version/registry but points
+    // at a different path in the same image — the operator lets the user win.
+    await seedInclude(all, `${PROD_REGISTRY}:${NEWER}!base-path`);
+
+    const plugin: Plugin = {
+      package: `${DEV_REGISTRY}:{{inherit}}!custom-path`,
+    };
+    await mergeMain(all, plugin);
+
+    // Base registry + inherited version, but the user's path — not `base-path`.
+    expect(plugin.package).toBe(`${PROD_REGISTRY}:${NEWER}!custom-path`);
+    expect(all[KEY_A]?.version).toBe(NEWER);
+    expect(all[KEY_A]?.package).toBe(`${PROD_REGISTRY}:${NEWER}!custom-path`);
     expect(Object.keys(all)).toEqual([KEY_A]);
   });
 });

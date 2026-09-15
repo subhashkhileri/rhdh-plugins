@@ -20,6 +20,7 @@ import { log } from './log';
 import { type OciImageCache } from './image-cache';
 import { npmPluginKey } from './npm-key';
 import {
+  applyInheritedPackage,
   ociPluginKey,
   type ParsedOciKey,
   tryParseOciRegistryAndPath,
@@ -164,7 +165,10 @@ async function mergeOciPlugin(
 ): Promise<void> {
   let parsed = await ociPluginKey(plugin.package, imageCache);
 
-  if (parsed.inherit && parsed.resolvedPath === null) {
+  if (parsed.inherit) {
+    // `{{inherit}}`, with or without an explicit `!plugin-path`: adopt the base
+    // plugin's version and registry. An explicit user path takes precedence over
+    // the base's (matches the operator's resolveInheritReference).
     parsed = resolveInherit(plugin, allPlugins, parsed);
   } else if (!plugin.package.includes('!') && parsed.resolvedPath) {
     plugin.package = `${plugin.package}!${parsed.resolvedPath}`;
@@ -175,6 +179,8 @@ async function mergeOciPlugin(
   const existing = allPlugins[parsed.pluginKey];
   if (!existing) {
     if (parsed.inherit) {
+      // resolveInherit throws when the base is missing, so a surviving inherit
+      // here would be a logic error — keep the guard as a safety net.
       throw new InstallException(
         `ERROR: {{inherit}} tag is set and there is currently no resolved tag or digest ` +
           `for ${plugin.package} in ${configFile}.`,
@@ -198,15 +204,17 @@ async function mergeOciPlugin(
     );
   }
 
-  if (!parsed.inherit) {
-    existing.package = plugin.package;
-    if (existing.version !== parsed.version) {
-      log(
-        `INFO: Overriding version for ${parsed.pluginKey} from \`${existing.version ?? ''}\` to \`${parsed.version}\``,
-      );
-    }
-    existing.version = parsed.version;
+  // Adopt the resolved package: for a plain override it is the main entry's own
+  // URL; for `{{inherit}}` it is the base's registry/version with the user's
+  // explicit `!plugin-path` applied when they gave one. `{{inherit}}` keeps the
+  // base version (parsed.version === existing.version) so the log stays quiet.
+  existing.package = plugin.package;
+  if (existing.version !== parsed.version) {
+    log(
+      `INFO: Overriding version for ${parsed.pluginKey} from \`${existing.version ?? ''}\` to \`${parsed.version}\``,
+    );
   }
+  existing.version = parsed.version;
   copyPluginFields(plugin, existing, [
     'package',
     'version',
@@ -216,11 +224,14 @@ async function mergeOciPlugin(
 }
 
 /**
- * Resolve `{{inherit}}` without a plugin path — finds the previously-merged
- * plugin with the same name (last OCI path segment) regardless of which
- * registry it came from, adopts its version + package, and mutates
- * `plugin.package` in place. Throws with a helpful message when no plugin of
- * that name was merged.
+ * Resolve `{{inherit}}` — finds the previously-merged plugin with the same name
+ * (last OCI path segment) regardless of which registry it came from, adopts its
+ * version and registry, and mutates `plugin.package` in place. Throws with a
+ * helpful message when no plugin of that name was merged.
+ *
+ * An explicit user `!plugin-path` on the inherit entry (`parsed.resolvedPath`)
+ * takes precedence over the base's path — matching the operator's
+ * `resolveInheritReference` — otherwise the base's path is kept.
  *
  * Because plugins are keyed by name, there is at most one candidate: a second
  * plugin resolving to the same name at the same merge level is rejected earlier
@@ -245,13 +256,15 @@ function resolveInherit(
     );
   }
   const version = basePlugin.version;
-  // The base package is a concrete OCI URL carrying the correct registry and
-  // plugin path — adopt it wholesale so install pulls from the right registry.
-  // Recover the path via the OCI grammar (not a naive `!` split) so a plugin
-  // path that itself contains `!` is preserved.
-  const resolvedPath =
-    tryParseOciRegistryAndPath(basePlugin.package)?.path ?? '';
-  plugin.package = basePlugin.package;
+  // The base package carries the correct registry and version; apply the user's
+  // explicit path when present, else keep the base's path.
+  plugin.package = applyInheritedPackage(
+    basePlugin.package,
+    parsed.resolvedPath,
+  );
+  // Recover the effective path via the OCI grammar (not a naive `!` split) so a
+  // plugin path that itself contains `!` is preserved.
+  const resolvedPath = tryParseOciRegistryAndPath(plugin.package)?.path ?? '';
   log(
     `\n======= Inheriting version \`${version}\` and plugin path \`${resolvedPath}\` for ${parsed.pluginKey}`,
   );

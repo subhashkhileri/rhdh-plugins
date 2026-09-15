@@ -43,6 +43,7 @@ import {
   mergePlugin,
   preMergeOciDisabledState,
 } from './merger';
+import { applyInheritedPackage } from './oci-key';
 import { computePluginHash } from './plugin-hash';
 import { Skopeo } from './skopeo';
 import { extractPluginName } from './plugin-name';
@@ -248,15 +249,16 @@ async function loadDynamicPluginsConfig(
  * @example
  * // ref://backstage-plugin-foo → oci://quay.io/rhdh/backstage-plugin-foo@sha256:abc
  */
-export function resolveRefPlugins(
-  mainPlugins: PluginSpec[],
+/**
+ * Build a name → concrete-package map from the include lists, keyed by plugin
+ * name (the last OCI path segment). First occurrence wins, matching the
+ * duplicate-name rejection in the merger. Shared by `ref://` and `{{inherit}}`
+ * resolution, both of which look a base up by name in the includes.
+ */
+function buildIncludeNameMap(
   includeLists: IncludePluginList[],
-): void {
-  const pluginsWithRef = mainPlugins.filter(p => isRefUrl(p.package));
-  if (pluginsWithRef.length === 0) return;
-
+): Map<string, string> {
   const nameToPackage = new Map<string, string>();
-
   for (const [, plugins] of includeLists) {
     for (const plugin of plugins) {
       const name = extractPluginName(plugin.package);
@@ -265,6 +267,17 @@ export function resolveRefPlugins(
       }
     }
   }
+  return nameToPackage;
+}
+
+export function resolveRefPlugins(
+  mainPlugins: PluginSpec[],
+  includeLists: IncludePluginList[],
+): void {
+  const pluginsWithRef = mainPlugins.filter(p => isRefUrl(p.package));
+  if (pluginsWithRef.length === 0) return;
+
+  const nameToPackage = buildIncludeNameMap(includeLists);
 
   for (const plugin of pluginsWithRef) {
     const refName = plugin.package.slice(REF_PROTO.length);
@@ -284,6 +297,65 @@ export function resolveRefPlugins(
     }
 
     plugin.package = resolved;
+  }
+}
+
+/** The `{{inherit}}` tag as it appears on an OCI package spec. */
+const INHERIT_TAG = ':{{inherit}}';
+
+/**
+ * Resolve main-config OCI `{{inherit}}` entries against the include lists,
+ * rewriting each to the base's concrete package (registry + version) while
+ * giving an explicit user `!plugin-path` precedence over the base's path.
+ *
+ * Like `resolveRefPlugins`, this MUST run before the pre-merge disabled pass:
+ * that pass keys on the full registry URL, so a base published to a different
+ * registry than the inheriting entry — and marked `disabled` in the catalog —
+ * would otherwise be filtered out before the name-based merge could find it,
+ * leaving the `{{inherit}}` unresolvable. Resolving here captures the base from
+ * the raw includes first. Mirrors the operator's `resolveReferences`, which
+ * resolves all references up front before merging.
+ *
+ * @example
+ * // oci://ghcr.io/org/plugin-a:{{inherit}} → oci://registry.redhat.io/rhdh/plugin-a@sha256:abc
+ */
+export function resolveInheritPlugins(
+  mainPlugins: PluginSpec[],
+  includeLists: IncludePluginList[],
+): void {
+  const pluginsWithInherit = mainPlugins.filter(
+    p =>
+      typeof p.package === 'string' &&
+      isOciUrl(p.package) &&
+      p.package.includes(INHERIT_TAG),
+  );
+  if (pluginsWithInherit.length === 0) return;
+
+  const nameToPackage = buildIncludeNameMap(includeLists);
+
+  for (const plugin of pluginsWithInherit) {
+    const name = extractPluginName(plugin.package);
+    if (!name) {
+      throw new InstallException(
+        `Cannot resolve {{inherit}} reference: unable to determine the plugin ` +
+          `name for '${plugin.package}'`,
+      );
+    }
+
+    const base = nameToPackage.get(name);
+    if (!base) {
+      throw new InstallException(
+        `Cannot use {{inherit}} for '${name}': no existing plugin configuration ` +
+          `found. Ensure a plugin named '${name}' is defined in an included file ` +
+          `with an explicit version.`,
+      );
+    }
+
+    // Everything after the first `!` is the user's explicit plugin path (the
+    // registry/tag/digest never contain `!`); when absent the base's path wins.
+    const bangIdx = plugin.package.indexOf('!');
+    const userPath = bangIdx === -1 ? null : plugin.package.slice(bangIdx + 1);
+    plugin.package = applyInheritedPackage(base, userPath);
   }
 }
 
@@ -335,6 +407,7 @@ async function loadAllPlugins(
   const mainPlugins = content.plugins ?? [];
 
   resolveRefPlugins(mainPlugins, includeLists);
+  resolveInheritPlugins(mainPlugins, includeLists);
 
   const disabledRegistries = preMergeOciDisabledState(
     includeLists,

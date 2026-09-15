@@ -43,11 +43,6 @@ import {
   mergePlugin,
   preMergeOciDisabledState,
 } from './merger';
-import {
-  applyInheritedPackage,
-  INHERIT_MARKER,
-  tryParseOciRegistryAndPath,
-} from './oci-key';
 import { computePluginHash } from './plugin-hash';
 import { Skopeo } from './skopeo';
 import { extractPluginName } from './plugin-name';
@@ -255,9 +250,9 @@ async function loadDynamicPluginsConfig(
  */
 /**
  * Build a name → concrete-package map from the include lists, keyed by plugin
- * name (the last OCI path segment). First occurrence wins, matching the
- * duplicate-name rejection in the merger. Shared by `ref://` and `{{inherit}}`
- * resolution, both of which look a base up by name in the includes.
+ * name (the last OCI path segment). First occurrence wins here; the name-based
+ * pre-merge validation rejects ambiguous same-level definitions before any
+ * plugin is installed.
  */
 function buildIncludeNameMap(
   includeLists: IncludePluginList[],
@@ -304,73 +299,12 @@ export function resolveRefPlugins(
   }
 }
 
-/** The `{{inherit}}` tag as it appears on an OCI package spec (in tag position). */
-const INHERIT_TAG = `:${INHERIT_MARKER}`;
-
-/**
- * Resolve main-config OCI `{{inherit}}` entries against the include lists,
- * rewriting each to the base's concrete package (registry + version) while
- * giving an explicit user `!plugin-path` precedence over the base's path.
- *
- * Like `resolveRefPlugins`, this MUST run before the pre-merge disabled pass:
- * that pass keys on the full registry URL, so a base published to a different
- * registry than the inheriting entry — and marked `disabled` in the catalog —
- * would otherwise be filtered out before the name-based merge could find it,
- * leaving the `{{inherit}}` unresolvable. Resolving here captures the base from
- * the raw includes first. Mirrors the operator's `resolveReferences`, which
- * resolves all references up front before merging.
- *
- * Like `resolveRefPlugins`, this covers only the **main config**; an `{{inherit}}`
- * appearing inside an included file is left for the merge-time `resolveInherit`
- * in the merger (which keys off the already-merged, level-aware plugin map). The
- * two paths are mutually exclusive — each entry is resolved exactly once — so
- * neither is redundant.
- *
- * @example
- * // oci://ghcr.io/org/plugin-a:{{inherit}} → oci://registry.redhat.io/rhdh/plugin-a@sha256:abc
- */
-export function resolveInheritPlugins(
-  mainPlugins: PluginSpec[],
-  includeLists: IncludePluginList[],
-): void {
-  const pluginsWithInherit = mainPlugins.filter(
-    p => isOciUrl(p.package) && p.package.includes(INHERIT_TAG),
-  );
-  if (pluginsWithInherit.length === 0) return;
-
-  const nameToPackage = buildIncludeNameMap(includeLists);
-
-  for (const plugin of pluginsWithInherit) {
-    const name = extractPluginName(plugin.package);
-    if (!name) {
-      throw new InstallException(
-        `Cannot resolve {{inherit}} reference: unable to determine the plugin ` +
-          `name for '${plugin.package}'`,
-      );
-    }
-
-    const base = nameToPackage.get(name);
-    if (!base) {
-      throw new InstallException(
-        `Cannot use {{inherit}} for '${name}': no existing plugin configuration ` +
-          `found. Ensure a plugin named '${name}' is defined in an included file ` +
-          `with an explicit version.`,
-      );
-    }
-
-    // The user's explicit `!plugin-path` (via the OCI grammar, not a naive
-    // split) takes precedence over the base's; when absent the base's wins.
-    const userPath = tryParseOciRegistryAndPath(plugin.package)?.path ?? null;
-    plugin.package = applyInheritedPackage(base, userPath);
-  }
-}
-
 /** Resolve include paths, substitute the catalog-index placeholder, merge
  * everything into a single `PluginMap`, and compute change-detection hashes.
  *
  * Two-phase to match the Python pre-merge OCI-disable pass: load every
  * include file's plugin list into memory FIRST, compute the effectively
- * disabled OCI registries, then filter those entries out of every list
+ * disabled OCI plugin names, then filter those entries out of every list
  * before merging. Without this pass an OCI plugin marked `disabled: true`
  * at level 1 would still trigger a `skopeo` round-trip during the level-0
  * merge — wasted work and a footgun in restricted-network init containers.
@@ -413,9 +347,8 @@ async function loadAllPlugins(
   const mainPlugins = content.plugins ?? [];
 
   resolveRefPlugins(mainPlugins, includeLists);
-  resolveInheritPlugins(mainPlugins, includeLists);
 
-  const disabledRegistries = preMergeOciDisabledState(
+  const disabledPluginNames = preMergeOciDisabledState(
     includeLists,
     mainPlugins,
     configFileAbs,
@@ -424,14 +357,14 @@ async function loadAllPlugins(
   for (const [inc, plugins] of includeLists) {
     for (const plugin of filterDisabledOciPlugins(
       plugins,
-      disabledRegistries,
+      disabledPluginNames,
     )) {
       await mergePlugin(plugin, allPlugins, inc, /* level */ 0, imageCache);
     }
   }
   for (const plugin of filterDisabledOciPlugins(
     mainPlugins,
-    disabledRegistries,
+    disabledPluginNames,
   )) {
     await mergePlugin(
       plugin,

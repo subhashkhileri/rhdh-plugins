@@ -161,6 +161,8 @@ const invalidCases: string[] = [
   // Multiple : in tag
   'oci://registry.io/plugin:v1:v2!plugin',
   'oci://host:1000/path:v1:v2!plugin',
+  // Inherit marker must be the complete tag
+  'oci://registry.io/plugin:{{inherit}}junk!plugin',
   // Empty tag
   'oci://registry.io/plugin:!plugin',
   'oci://registry.io/plugin:',

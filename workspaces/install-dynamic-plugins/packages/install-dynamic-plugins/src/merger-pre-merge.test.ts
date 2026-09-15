@@ -103,6 +103,38 @@ describe('preMergeOciDisabledState — level overrides', () => {
       ],
       expectDisabled: false,
     },
+    {
+      name: 'cross-registry: include enabled, explicit-version main disables → disabled by name',
+      include: [
+        {
+          package: 'oci://registry.redhat.io/rhdh/plugin:1.0',
+          disabled: false,
+        },
+      ],
+      main: [
+        {
+          package: 'oci://ghcr.io/example/plugin:2.0',
+          disabled: true,
+        },
+      ],
+      expectDisabled: true,
+    },
+    {
+      name: 'cross-registry: disabled include, main inherit re-enables → enabled by name',
+      include: [
+        {
+          package: 'oci://registry.redhat.io/rhdh/plugin:1.0',
+          disabled: true,
+        },
+      ],
+      main: [
+        {
+          package: 'oci://ghcr.io/example/plugin:{{inherit}}',
+          disabled: false,
+        },
+      ],
+      expectDisabled: false,
+    },
   ];
 
   it.each(cases)('$name', ({ include, main, expectDisabled }) => {
@@ -111,83 +143,34 @@ describe('preMergeOciDisabledState — level overrides', () => {
       main,
       'main.yaml',
     );
-    const registry = 'oci://registry.example.com/plugin';
-    expect(result.has(registry)).toBe(expectDisabled);
-  });
-});
-
-describe('preMergeOciDisabledState — path-less + multiple explicit paths', () => {
-  const include: PluginSpec[] = [
-    { package: 'oci://registry.example.com/plugin:1.0!pluginA' },
-    { package: 'oci://registry.example.com/plugin:1.0!pluginB' },
-  ];
-
-  it('warns and skips when the path-less reference is disabled', () => {
-    const warn = jest
-      .spyOn(process.stdout, 'write')
-      .mockImplementation(() => true);
-    try {
-      const main: PluginSpec[] = [
-        {
-          package: 'oci://registry.example.com/plugin:{{inherit}}',
-          disabled: true,
-        },
-      ];
-      const result = preMergeOciDisabledState(
-        [['include.yaml', include]],
-        main,
-        'main.yaml',
-      );
-      expect(result.has('oci://registry.example.com/plugin')).toBe(true);
-      const out = warn.mock.calls.map(args => String(args[0])).join('\n');
-      expect(out).toMatch(
-        /WARNING: Skipping disabled ambiguous path-less OCI reference/,
-      );
-      expect(out).toMatch(/multiple path-specific entries exist/);
-      expect(out).toMatch(
-        /Cannot use path-less syntax for multi-plugin images/,
-      );
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it('throws when the path-less reference is enabled', () => {
-    const main: PluginSpec[] = [
-      {
-        package: 'oci://registry.example.com/plugin:{{inherit}}',
-        disabled: false,
-      },
-    ];
-    expect(() =>
-      preMergeOciDisabledState([['include.yaml', include]], main, 'main.yaml'),
-    ).toThrow(/Ambiguous path-less OCI reference/);
+    expect(result.has('plugin')).toBe(expectDisabled);
   });
 });
 
 describe('preMergeOciDisabledState — same-level duplicates', () => {
-  it('warns and ignores duplicate disabled entries at the same level', () => {
-    const warn = jest
-      .spyOn(process.stdout, 'write')
-      .mockImplementation(() => true);
+  it('rejects duplicate disabled names before filtering can hide them', () => {
+    const first = 'oci://registry.redhat.io/rhdh/plugin:1.0!first-path';
+    const second = 'oci://ghcr.io/example/plugin:2.0!second-path';
+    let thrown: unknown;
     try {
-      const include: PluginSpec[] = [
-        { package: 'oci://registry.example.com/plugin:1.0!a', disabled: true },
-        { package: 'oci://registry.example.com/plugin:1.0!a', disabled: true },
-      ];
-      const result = preMergeOciDisabledState(
-        [['include.yaml', include]],
+      preMergeOciDisabledState(
+        [
+          ['catalog-a.yaml', [{ package: first, disabled: true }]],
+          ['catalog-b.yaml', [{ package: second, disabled: true }]],
+        ],
         [],
         'main.yaml',
       );
-      expect(result.has('oci://registry.example.com/plugin')).toBe(false);
-      const out = warn.mock.calls.map(args => String(args[0])).join('\n');
-      expect(out).toMatch(
-        /WARNING: Skipping duplicate disabled OCI plugin configuration/,
-      );
-    } finally {
-      warn.mockRestore();
+    } catch (error) {
+      thrown = error;
     }
+    expect(thrown).toBeInstanceOf(InstallException);
+    const message = thrown instanceof Error ? thrown.message : String(thrown);
+    expect(message).toContain(first);
+    expect(message).toContain('catalog-a.yaml');
+    expect(message).toContain(second);
+    expect(message).toContain('catalog-b.yaml');
+    expect(message).toContain("the plugin name 'plugin'");
   });
 
   it('throws on duplicate enabled entries at the same level', () => {
@@ -197,7 +180,17 @@ describe('preMergeOciDisabledState — same-level duplicates', () => {
     ];
     expect(() =>
       preMergeOciDisabledState([['include.yaml', include]], [], 'main.yaml'),
-    ).toThrow(/Duplicate OCI plugin configuration/);
+    ).toThrow(/Duplicate OCI plugin configurations/);
+  });
+
+  it('rejects multiple plugin paths from one image because identity is the image name', () => {
+    const include: PluginSpec[] = [
+      { package: 'oci://registry.example.com/plugin:1.0!pluginA' },
+      { package: 'oci://registry.example.com/plugin:1.0!pluginB' },
+    ];
+    expect(() =>
+      preMergeOciDisabledState([['include.yaml', include]], [], 'main.yaml'),
+    ).toThrow(/both resolve to the plugin name 'plugin'/);
   });
 });
 
@@ -227,18 +220,25 @@ describe('preMergeOciDisabledState — invalid OCI strings', () => {
       InstallException,
     );
   });
+
+  it('does not accept a malformed tag merely because it contains the inherit marker', () => {
+    const pkg = 'oci://ghcr.io/example/plugin:{{inherit}}junk!plugin';
+    expect(() =>
+      preMergeOciDisabledState([], [{ package: pkg }], 'main.yaml'),
+    ).toThrow(`oci package '${pkg}' is not in the expected format`);
+  });
 });
 
 describe('filterDisabledOciPlugins', () => {
-  it('removes plugins whose registry is in the disabled set', () => {
+  it('removes plugins whose name is in the disabled set', () => {
     const plugins: PluginSpec[] = [
       { package: 'oci://registry.example.com/plugin:1.0!a' },
-      { package: 'oci://other.example.com/plugin:2.0!b' },
+      { package: 'oci://other.example.com/other-plugin:2.0!b' },
     ];
-    const disabled = new Set(['oci://registry.example.com/plugin']);
+    const disabled = new Set(['plugin']);
     const out = filterDisabledOciPlugins(plugins, disabled);
     expect(out.map(p => p.package)).toEqual([
-      'oci://other.example.com/plugin:2.0!b',
+      'oci://other.example.com/other-plugin:2.0!b',
     ]);
   });
 
@@ -256,10 +256,7 @@ describe('filterDisabledOciPlugins', () => {
       { package: '@scope/pkg@1.0.0' },
       { package: './local-plugin' },
     ];
-    const out = filterDisabledOciPlugins(
-      plugins,
-      new Set(['oci://something/plugin']),
-    );
+    const out = filterDisabledOciPlugins(plugins, new Set(['plugin']));
     expect(out).toHaveLength(2);
   });
 
@@ -274,7 +271,7 @@ describe('filterDisabledOciPlugins', () => {
 });
 
 describe('preMergeOciDisabledState — enabled field', () => {
-  it('enabled: false in main disables the registry', () => {
+  it('enabled: false in main disables the plugin name', () => {
     const include: PluginSpec[] = [
       { package: 'oci://registry.example.com/plugin:1.0', enabled: true },
     ];
@@ -289,7 +286,7 @@ describe('preMergeOciDisabledState — enabled field', () => {
       main,
       'main.yaml',
     );
-    expect(result.has('oci://registry.example.com/plugin')).toBe(true);
+    expect(result.has('plugin')).toBe(true);
   });
 
   it('enabled: true in main re-enables a disabled include', () => {
@@ -307,7 +304,7 @@ describe('preMergeOciDisabledState — enabled field', () => {
       main,
       'main.yaml',
     );
-    expect(result.has('oci://registry.example.com/plugin')).toBe(false);
+    expect(result.has('plugin')).toBe(false);
   });
 
   it('enabled takes precedence when both enabled and disabled are set', () => {
@@ -319,6 +316,6 @@ describe('preMergeOciDisabledState — enabled field', () => {
       },
     ];
     const result = preMergeOciDisabledState([], main, 'main.yaml');
-    expect(result.has('oci://registry.example.com/plugin')).toBe(false);
+    expect(result.has('plugin')).toBe(false);
   });
 });

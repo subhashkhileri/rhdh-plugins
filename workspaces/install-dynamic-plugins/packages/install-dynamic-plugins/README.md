@@ -52,9 +52,9 @@ oci://quay.io/rhdh/backstage-plugin-catalog:{{inherit}}
 
 This makes resolution **host-agnostic**: `{{inherit}}` in a user's `dynamic-plugins.yaml` matches a plugin of the same name from an included file (typically the catalog-index DPDY) even when the two were published to different registries at different pipeline stages (e.g. GHCR in development, `registry.redhat.io` in production). The inherited entry adopts the **base** plugin's version _and_ its concrete package URL, so install still pulls from the registry the catalog actually shipped. This matches the operator's `DynaPlugin.Name()` behaviour (see [rhdh-operator#3215](https://github.com/redhat-developer/rhdh-operator/pull/3215)).
 
-`{{inherit}}` entries are resolved in a pre-pass **before** the pre-merge disabled scan — the same ordering already used for `ref://`, and mirroring the operator's `resolveReferences`. This matters because that scan keys on the full registry URL: without the pre-pass, a base marked `disabled` in the catalog and re-enabled from a **different** registry via `{{inherit}}` would be filtered out before the name-based merge could find it, aborting the install. If you supply an explicit `!plugin-path` on the inherit entry (e.g. `oci://ghcr.io/org/plugin:{{inherit}}!custom-path`), that path takes precedence over the base's — again matching the operator's `resolveInheritReference`.
+The pre-merge disabled scan uses this same name-based identity. A higher-level entry therefore enables or disables the matching plugin across registry hosts and namespaces before anything is filtered. This keeps a disabled catalog base available when a cross-registry `{{inherit}}` entry re-enables it. If you supply an explicit `!plugin-path` on the inherit entry (e.g. `oci://ghcr.io/org/plugin:{{inherit}}!custom-path`), that path takes precedence over the base's — again matching the operator's `resolveInheritReference`.
 
-Because identity is the name, **the last OCI path segment must be unique per plugin**. If two enabled entries at the same merge level resolve to the same name, the install fails with an error that names both conflicting packages — rename one of the images so they resolve to distinct names.
+Because identity is the name, **the last OCI path segment must be unique per plugin**. If two entries at the same merge level resolve to the same name, the install fails before disabled filtering with an error that names both conflicting packages and their source files. This includes disabled entries, which prevents an ambiguous catalog definition from being silently hidden — rename one of the images so they resolve to distinct names.
 
 > **NOTE:** This name-only identity means a single OCI image that packages **multiple** dynamic plugins under distinct `!plugin-path` suffixes cannot be distinguished by name — all of its plugins share the image's last path segment and would collide. The convention (and the way the RHDH catalog is built) is one plugin per image, with the image name equal to the plugin name. Multi-plugin images are not supported by name-based matching; publish each plugin as its own image.
 
@@ -133,7 +133,7 @@ From the workspace root:
 ```sh
 yarn install
 yarn tsc          # type-check
-yarn test         # Jest unit tests (166 tests)
+yarn test         # Jest unit tests
 yarn workspace @red-hat-developer-hub/cli-module-install-dynamic-plugins build
 ```
 
@@ -144,4 +144,4 @@ yarn workspace @red-hat-developer-hub/cli-module-install-dynamic-plugins build
 - The **input contract** matches the previous Python script exactly: same `dynamic-plugins.yaml` schema (`includes`, `plugins`, `package`, `pluginConfig`, `disabled`, `pullPolicy`, `forceDownload`, `integrity`).
 - The **output contract** matches: same `app-config.dynamic-plugins.yaml`, same plugin directory layout, same `dynamic-plugin-config.hash` / `dynamic-plugin-image.hash` files.
 - OCI path auto-detection, registry fallback, integrity algorithms, and lock-file behaviour are preserved.
-- `{{inherit}}` now matches by plugin **name** (last OCI path segment) rather than the full OCI URL, so resolution is host- and namespace-agnostic and aligns with the operator. See [Plugin identity and `{{inherit}}` matching](#plugin-identity-and-inherit-matching). Existing `dynamic-plugins.yaml` configs need no changes; explicit `!plugin-path` overrides and explicit version overrides behave as before.
+- `{{inherit}}` now matches by plugin **name** (last OCI path segment) rather than the full OCI URL, so resolution is host- and namespace-agnostic and aligns with the operator. See [Plugin identity and `{{inherit}}` matching](#plugin-identity-and-inherit-matching). Configs that follow the one-plugin-per-image naming convention need no changes; explicit `!plugin-path` overrides and explicit version overrides behave as before.

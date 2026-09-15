@@ -20,6 +20,9 @@ import { extractPluginName } from './plugin-name';
 import { OCI_PROTO } from './protocols';
 import { RECOGNIZED_ALGORITHMS } from './types';
 
+/** The literal tag that requests version/registry inheritance from a base. */
+export const INHERIT_MARKER = '{{inherit}}';
+
 const OCI_PATTERN = [
   '^(',
   escape(OCI_PROTO),
@@ -27,16 +30,13 @@ const OCI_PATTERN = [
   String.raw`(?::\d+)?`, // optional port
   String.raw`(?:/[^\s:@]+)+`, // at least one path segment
   ')',
-  String.raw`(?::([^\s!@:]+)`, // tag
+  String.raw`(?::((?:\{\{inherit\}\}|[^\s!@:{}]+))`, // tag
   '|',
   String.raw`@((?:sha256|sha512|blake3):[^\s!@:]+))`, // or digest
   String.raw`(?:!([^\s]+))?$`, // optional !<plugin-path>
 ].join('');
 
 export const OCI_REGEX = new RegExp(OCI_PATTERN);
-
-/** The literal tag that requests version/registry inheritance from a base. */
-export const INHERIT_MARKER = '{{inherit}}';
 
 export type ParsedOciKey = {
   /**

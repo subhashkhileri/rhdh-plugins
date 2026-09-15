@@ -26,10 +26,9 @@ import type { Plugin, PluginMap } from './types';
  * `DynaPlugin.Name()` matching and is what lets `{{inherit}}` resolve across
  * pipeline stages that publish the same plugin to different registries.
  *
- * `merger-pre-merge.test.ts` also spells `{{inherit}}` in its fixtures, but
- * `preMergeOciDisabledState` never parses the tag — it only reads the registry
- * and the `!path` suffix — so those occurrences exercise none of this file's
- * behaviour.
+ * `merger-pre-merge.test.ts` also spells `{{inherit}}` in its fixtures, but it
+ * only validates the OCI grammar and computes disabled state by plugin name;
+ * the actual version, registry, and path inheritance is exercised here.
  *
  * Every package string below either carries an explicit `!<plugin-path>` or is
  * a path-less `{{inherit}}`. Both return from `ociPluginKey` before
